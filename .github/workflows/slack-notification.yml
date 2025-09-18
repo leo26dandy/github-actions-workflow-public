@@ -1,0 +1,92 @@
+      # Slack notification on successful deployment
+      - name: Slack Notification - Success
+        if: success()
+        uses: slackapi/slack-github-action@v1.24.0
+        with:
+          # Use either channel-id (C1234567890) or channel (#channel-name)
+          channel-id: '#channel-name'
+          slack-message: |
+            ✅ *Clien Portal Graphic Designer Deployment Successful!*
+            
+            ```
+            Environment :  ${{ github.ref_name == 'main' && 'Production (https://production.app)' || 'Staging (https://fe.staging.app)' }}
+            Repository  :  ${{ github.repository }}
+            Branch      :  ${{ github.ref_name }}
+            Author      :  ${{ github.actor }}
+            Message     :  ${{ github.event.head_commit.message }}
+            ```
+            
+            🔗 [View Commit](${{ github.event.head_commit.url }})
+        env:
+          SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
+      
+      # Slack notification on deployment failure
+      - name: Slack Notification - Failure
+        if: failure()
+        uses: slackapi/slack-github-action@v2.1.1
+        with:
+          method: chat.postMessage
+          token: ${{ secrets.SLACK_BOT_TOKEN }}
+          payload: |
+            {
+              "channel": "${{ secrets.SLACK_CHANNEL_ID }}",
+              "text": "❌ Hurkmans Theme Deployment Failed!",
+              "blocks": [
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "❌ *Hurkmans Theme Deployment Failed!*"
+                  }
+                },
+                {
+                  "type": "section",
+                  "fields": [
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Environment:*\n${{ github.ref_name == 'main' && 'Production (https://production.app)' || 'Staging (https://fe.staging.app)' }}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Branch:*\n`${{ github.ref_name }}`"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Author:*\n${{ github.actor }}"
+                    },
+                    {
+                      "type": "mrkdwn",
+                      "text": "*Repository:*\n${{ github.repository }}"
+                    }
+                  ]
+                },
+                {
+                  "type": "section",
+                  "text": {
+                    "type": "mrkdwn",
+                    "text": "*Commit Message:*\n${{ github.event.head_commit.message }}"
+                  }
+                },
+                {
+                  "type": "actions",
+                  "elements": [
+                    {
+                      "type": "button",
+                      "text": {
+                        "type": "plain_text",
+                        "text": "View Logs"
+                      },
+                      "url": "${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}"
+                    },
+                    {
+                      "type": "button",
+                      "text": {
+                        "type": "plain_text",
+                        "text": "View Commit"
+                      },
+                      "url": "${{ github.event.head_commit.url }}"
+                    }
+                  ]
+                }
+              ]
+            }
