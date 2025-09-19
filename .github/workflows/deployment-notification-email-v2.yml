@@ -1,0 +1,372 @@
+name: Deployment Notification Email
+
+on:
+  workflow_run:
+    workflows: ["Deployment Notification Email: Project_Name to Production & Development"]
+    types: [completed]
+  workflow_dispatch:
+    inputs:
+      test_status:
+        description: 'Test deployment status'
+        required: true
+        default: 'success'
+        type: choice
+        options:
+          - success
+          - failure
+      test_branch:
+        description: 'Test branch name'
+        required: true
+        default: 'dev-stable'
+        type: choice
+        options:
+          - main
+          - dev-stable
+
+jobs:
+  notify:
+    runs-on: ubuntu-latest
+    
+    steps:
+      - name: Checkout
+        uses: actions/checkout@v4
+        with:
+          fetch-depth: 2
+
+      - name: Determine workflow status and details
+        id: deployment-info
+        run: |
+          set -e
+          
+          if [[ "${{ github.event_name }}" == "workflow_dispatch" ]]; then
+            # Manual test mode
+            echo "deployment_status=${{ inputs.test_status }}" >> $GITHUB_OUTPUT
+            echo "deployment_branch=${{ inputs.test_branch }}" >> $GITHUB_OUTPUT
+            echo "deployment_conclusion=${{ inputs.test_status }}" >> $GITHUB_OUTPUT
+            echo "workflow_url=https://github.com/${{ github.repository }}/actions/runs/${{ github.run_id }}" >> $GITHUB_OUTPUT
+            echo "commit_sha=${{ github.sha }}" >> $GITHUB_OUTPUT
+            echo "trigger_type=Manual Test" >> $GITHUB_OUTPUT
+          else
+            # Real workflow run
+            echo "deployment_status=${{ github.event.workflow_run.conclusion }}" >> $GITHUB_OUTPUT
+            echo "deployment_branch=${{ github.event.workflow_run.head_branch }}" >> $GITHUB_OUTPUT
+            echo "deployment_conclusion=${{ github.event.workflow_run.conclusion }}" >> $GITHUB_OUTPUT
+            echo "workflow_url=${{ github.event.workflow_run.html_url }}" >> $GITHUB_OUTPUT
+            echo "commit_sha=${{ github.event.workflow_run.head_sha }}" >> $GITHUB_OUTPUT
+            echo "trigger_type=Automated Deployment" >> $GITHUB_OUTPUT
+          fi
+          
+          echo "timestamp=$(date '+%A, %B %d, %Y at %I:%M %p %Z')" >> $GITHUB_OUTPUT
+
+      - name: Get commit and repository information
+        id: commit-info
+        run: |
+          set -e
+          
+          # Get commit information
+          if git rev-parse "${{ steps.deployment-info.outputs.commit_sha }}" >/dev/null 2>&1; then
+            commit_message=$(git log -1 --pretty=format:'%s' "${{ steps.deployment-info.outputs.commit_sha }}" 2>/dev/null || echo "Deployment commit")
+            commit_author=$(git log -1 --pretty=format:'%an' "${{ steps.deployment-info.outputs.commit_sha }}" 2>/dev/null || echo "${{ github.actor }}")
+            commit_url="https://github.com/${{ github.repository }}/commit/${{ steps.deployment-info.outputs.commit_sha }}"
+          else
+            commit_message="Deployment workflow executed"
+            commit_author="${{ github.actor }}"
+            commit_url="https://github.com/${{ github.repository }}"
+          fi
+          
+          # Safe output of commit message
+          {
+            echo "commit_message<<EOF_COMMIT"
+            echo "$commit_message"
+            echo "EOF_COMMIT"
+          } >> $GITHUB_OUTPUT
+          
+          echo "commit_author=$commit_author" >> $GITHUB_OUTPUT
+          echo "commit_url=$commit_url" >> $GITHUB_OUTPUT
+          
+          # Determine environment details
+          if [[ "${{ steps.deployment-info.outputs.deployment_branch }}" == "main" ]]; then
+            echo "environment=Production" >> $GITHUB_OUTPUT
+            echo "site_url=https://project-url.tld" >> $GITHUB_OUTPUT
+            echo "environment_emoji=🟩" >> $GITHUB_OUTPUT
+          else
+            echo "environment=Development" >> $GITHUB_OUTPUT
+            echo "site_url=https://project-url.tld" >> $GITHUB_OUTPUT
+            echo "environment_emoji=🟨" >> $GITHUB_OUTPUT
+          fi
+          
+          # Get changed files (last 10)
+          if git rev-parse "${{ steps.deployment-info.outputs.commit_sha }}~1" >/dev/null 2>&1; then
+            files=$(git diff --name-only "${{ steps.deployment-info.outputs.commit_sha }}~1" "${{ steps.deployment-info.outputs.commit_sha }}" 2>/dev/null | head -10 || echo "wp-content/themes/starter-hello-elementor-child/")
+          else
+            files="wp-content/themes/theme-child/"
+          fi
+          
+          {
+            echo "changed_files<<EOF_FILES"
+            echo "$files"
+            echo "EOF_FILES"
+          } >> $GITHUB_OUTPUT
+
+      - name: Create deployment email content
+        id: email
+        run: |
+          set -e
+          
+          # Determine status-specific variables
+          if [[ "${{ steps.deployment-info.outputs.deployment_status }}" == "success" ]]; then
+            status_emoji="✅"
+            status_text="DEPLOYMENT SUCCESSFUL"
+            status_color="#28a745"
+            bg_color="#d4edda"
+            border_color="#c3e6cb"
+            priority="normal"
+            action_text="🌐 View Live Site"
+            action_url="${{ steps.commit-info.outputs.site_url }}"
+          else
+            status_emoji="❌"
+            status_text="DEPLOYMENT FAILED"
+            status_color="#dc3545"
+            bg_color="#f8d7da"
+            border_color="#f5c6cb"
+            priority="high"
+            action_text="🔍 View Logs"
+            action_url="${{ steps.deployment-info.outputs.workflow_url }}"
+          fi
+          
+          # Create email template
+          cat << 'SCRIPT_EOF' > generate_deployment_email.js
+          const fs = require('fs');
+          
+          // Read environment variables safely
+          const data = {
+            statusEmoji: process.env.STATUS_EMOJI || '⚡',
+            statusText: process.env.STATUS_TEXT || 'Deployment',
+            statusColor: process.env.STATUS_COLOR || '#007bff',
+            bgColor: process.env.BG_COLOR || '#f8f9fa',
+            borderColor: process.env.BORDER_COLOR || '#dee2e6',
+            environment: process.env.ENVIRONMENT || 'Unknown',
+            environmentEmoji: process.env.ENVIRONMENT_EMOJI || '🔧',
+            branch: process.env.DEPLOYMENT_BRANCH || 'unknown',
+            commitMessage: process.env.COMMIT_MESSAGE || 'No message',
+            commitAuthor: process.env.COMMIT_AUTHOR || 'Unknown',
+            commitUrl: process.env.COMMIT_URL || '#',
+            workflowUrl: process.env.WORKFLOW_URL || '#',
+            siteUrl: process.env.SITE_URL || '#',
+            actionText: process.env.ACTION_TEXT || 'View Details',
+            actionUrl: process.env.ACTION_URL || '#',
+            timestamp: process.env.TIMESTAMP || 'Unknown time',
+            repository: process.env.REPOSITORY || 'unknown/repo',
+            triggerType: process.env.TRIGGER_TYPE || 'Deployment',
+            changedFiles: (process.env.CHANGED_FILES || 'No files').split('\n').filter(f => f.trim())
+          };
+          
+          // HTML escape function
+          function escapeHtml(text) {
+            const map = {
+              '&': '&amp;',
+              '<': '&lt;',
+              '>': '&gt;',
+              '"': '&quot;',
+              "'": '&#039;'
+            };
+            return text.replace(/[&<>"']/g, m => map[m]);
+          }
+          
+          // Generate file list
+          const filesList = data.changedFiles.map(file => 
+            file.trim() ? `<div style="padding: 3px 0; color: #666; word-break: break-all;">• ${escapeHtml(file)}</div>` : ''
+          ).filter(Boolean).join('') || '<div style="color: #999; font-style: italic;">No files to display</div>';
+          
+          const html = `<!DOCTYPE html>
+          <html>
+          <head>
+            <meta charset="utf-8">
+            <meta name="viewport" content="width=device-width, initial-scale=1.0">
+            <title>Deployment Notification - ${escapeHtml(data.statusText)}</title>
+          </head>
+          <body style="font-family: -apple-system, BlinkMacSystemFont, 'Segoe UI', Roboto, Arial, sans-serif; background: #f8f9fa; margin: 0; padding: 20px; line-height: 1.6;">
+          
+            <div style="max-width: 600px; margin: 0 auto; background: white; border-radius: 10px; box-shadow: 0 4px 15px rgba(0,0,0,0.1); overflow: hidden;">
+              
+              <!-- Header Banner -->
+              <div style="background: linear-gradient(135deg, ${data.statusColor} 0%, ${data.statusColor}dd 100%); color: white; padding: 25px; text-align: center; position: relative;">
+                <div style="position: absolute; top: 0; left: 0; width: 100%; height: 100%; background: url('data:image/svg+xml,<svg xmlns=\"http://www.w3.org/2000/svg\" viewBox=\"0 0 100 100\"><defs><pattern id=\"grain\" width=\"100\" height=\"100\" patternUnits=\"userSpaceOnUse\"><circle cx=\"50\" cy=\"50\" r=\"1\" fill=\"%23ffffff\" opacity=\"0.1\"/></pattern></defs><rect width=\"100\" height=\"100\" fill=\"url(%23grain)\"/></svg>'); opacity: 0.1;"></div>
+                <div style="position: relative; z-index: 1;">
+                  <img src="https://media.licdn.com/dms/image/v2/C560BAQErBia5Tf7sjQ/company-logo_200_200/company-logo_200_200/0/1630670312313/madeindonesia_logo?e=2147483647&v=beta&t=j2YYCH7ZKk7jtWXd5o4TYAxoG3ods-hT9bEHe8qxJ0g" alt="Made Indonesia" style="width: 70px; height: 70px; margin-bottom: 15px; border-radius: 50%; background: white; padding: 6px; object-fit: cover; box-shadow: 0 2px 8px rgba(0,0,0,0.2);">
+                  <div style="font-size: 28px; font-weight: bold; margin-bottom: 8px;">${data.statusEmoji} ${escapeHtml(data.statusText)}</div>
+                  <div style="font-size: 18px; opacity: 0.9; font-weight: 500;">${data.environmentEmoji} ${escapeHtml(data.environment)} Environment</div>
+                </div>
+              </div>
+              
+              <!-- Status Banner -->
+              <div style="background: ${data.bgColor}; border: 2px solid ${data.borderColor}; margin: 20px; padding: 20px; border-radius: 8px; text-align: center;">
+                <div style="font-size: 20px; font-weight: 600; color: ${data.statusColor}; margin-bottom: 8px;">
+                  📝 ${escapeHtml(data.commitMessage)}
+                </div>
+                <div style="font-size: 14px; color: #666; margin-bottom: 15px;">
+                  by <strong style="color: ${data.statusColor};">${escapeHtml(data.commitAuthor)}</strong> • 
+                  <span style="background: ${data.statusColor}; color: white; padding: 3px 10px; border-radius: 15px; font-size: 12px; font-weight: 600;">${escapeHtml(data.branch)}</span>
+                </div>
+                <div style="margin-top: 15px;">
+                  <a href="${escapeHtml(data.actionUrl)}" style="background: ${data.statusColor}; color: white; padding: 12px 24px; text-decoration: none; border-radius: 6px; font-weight: 600; display: inline-block; box-shadow: 0 2px 4px rgba(0,0,0,0.1);">
+                    ${escapeHtml(data.actionText)}
+                  </a>
+                </div>
+              </div>
+              
+              <!-- Main Content -->
+              <div style="padding: 0 30px 30px;">
+                
+                <!-- Details Grid -->
+                <div style="display: grid; grid-template-columns: 1fr 1fr; gap: 20px; margin-bottom: 25px;">
+                  <div style="background: #f8f9fa; padding: 15px; border-radius: 6px; border-left: 4px solid ${data.statusColor};">
+                    <div style="font-weight: 600; color: #333; margin-bottom: 5px;">🏢 Repository</div>
+                    <div style="color: #666; font-size: 14px;">${escapeHtml(data.repository)}</div>
+                  </div>
+                  <div style="background: #f8f9fa; padding: 15px; border-radius: 6px; border-left: 4px solid ${data.statusColor};">
+                    <div style="font-weight: 600; color: #333; margin-bottom: 5px;">⏰ Deployed At</div>
+                    <div style="color: #666; font-size: 14px;">${escapeHtml(data.timestamp)}</div>
+                  </div>
+                </div>
+          
+                <!-- Action Links -->
+                <div style="background: #f8f9fa; padding: 20px; border-radius: 8px; margin-bottom: 25px;">
+                  <div style="font-size: 16px; font-weight: 600; color: #333; margin-bottom: 15px;">🔗 Quick Links</div>
+                  <div style="display: flex; flex-wrap: wrap; gap: 10px;">
+                    <a href="${escapeHtml(data.siteUrl)}" style="background: #007bff; color: white; padding: 8px 16px; text-decoration: none; border-radius: 4px; font-size: 13px; font-weight: 500;">
+                      🌐 Live Site
+                    </a>
+                    <a href="${escapeHtml(data.workflowUrl)}" style="background: #6c757d; color: white; padding: 8px 16px; text-decoration: none; border-radius: 4px; font-size: 13px; font-weight: 500;">
+                      📋 Workflow Logs
+                    </a>
+                    <a href="${escapeHtml(data.commitUrl)}" style="background: #28a745; color: white; padding: 8px 16px; text-decoration: none; border-radius: 4px; font-size: 13px; font-weight: 500;">
+                      📝 View Commit
+                    </a>
+                  </div>
+                </div>
+          
+                <!-- Changed Files -->
+                <div>
+                  <div style="font-size: 16px; font-weight: 600; color: #333; margin-bottom: 12px; display: flex; align-items: center;">
+                    <span style="margin-right: 8px;">📁</span> Deployed Files
+                  </div>
+                  <div style="background: #f8f9fa; border: 1px solid #dee2e6; border-radius: 6px; padding: 15px; font-family: 'Courier New', monospace; font-size: 12px; max-height: 200px; overflow-y: auto;">
+                    ${filesList}
+                  </div>
+                </div>
+              </div>
+          
+              <!-- Footer -->
+              <div style="background: linear-gradient(to right, #f8f9fa, #e9ecef); border-top: 1px solid #dee2e6; padding: 20px; text-align: center; color: #666; font-size: 12px;">
+                <div style="font-weight: 600; margin-bottom: 5px;">🤖 ${escapeHtml(data.triggerType)} Notification</div>
+                <div>Automated from <strong>${escapeHtml(data.repository)}</strong> • ${escapeHtml(data.timestamp)}</div>
+                <div style="margin-top: 8px; font-size: 11px; opacity: 0.8;">
+                  This email was automatically generated by GitHub Actions
+                </div>
+              </div>
+            </div>
+          
+          </body>
+          </html>`;
+          
+          fs.writeFileSync('deployment-email.html', html);
+          SCRIPT_EOF
+          
+          # Set environment variables for the Node.js script
+          export STATUS_EMOJI="$status_emoji"
+          export STATUS_TEXT="$status_text"
+          export STATUS_COLOR="$status_color"
+          export BG_COLOR="$bg_color"
+          export BORDER_COLOR="$border_color"
+          export ENVIRONMENT="${{ steps.commit-info.outputs.environment }}"
+          export ENVIRONMENT_EMOJI="${{ steps.commit-info.outputs.environment_emoji }}"
+          export DEPLOYMENT_BRANCH="${{ steps.deployment-info.outputs.deployment_branch }}"
+          export COMMIT_MESSAGE="${{ steps.commit-info.outputs.commit_message }}"
+          export COMMIT_AUTHOR="${{ steps.commit-info.outputs.commit_author }}"
+          export COMMIT_URL="${{ steps.commit-info.outputs.commit_url }}"
+          export WORKFLOW_URL="${{ steps.deployment-info.outputs.workflow_url }}"
+          export SITE_URL="${{ steps.commit-info.outputs.site_url }}"
+          export ACTION_TEXT="$action_text"
+          export ACTION_URL="$action_url"
+          export TIMESTAMP="${{ steps.deployment-info.outputs.timestamp }}"
+          export REPOSITORY="${{ github.repository }}"
+          export TRIGGER_TYPE="${{ steps.deployment-info.outputs.trigger_type }}"
+          export CHANGED_FILES="${{ steps.commit-info.outputs.changed_files }}"
+          
+          # Generate the email HTML
+          node generate_deployment_email.js
+          
+          # Output email subject and priority
+          echo "email_subject=[${{ steps.deployment-info.outputs.deployment_branch }}] $status_emoji Deployment ${{ steps.deployment-info.outputs.deployment_conclusion == 'success' && 'Successful' || 'Failed' }}: ${{ steps.commit-info.outputs.commit_message }}" >> $GITHUB_OUTPUT
+          echo "email_priority=$priority" >> $GITHUB_OUTPUT
+
+      - name: Send deployment notification email
+        if: always()
+        uses: dawidd6/action-send-mail@v3
+        with:
+          server_address: ${{ secrets.SMTP_SERVER }}
+          server_port: ${{ secrets.SMTP_PORT }}
+          username: ${{ secrets.EMAIL_USERNAME }}
+          password: ${{ secrets.EMAIL_PASSWORD }}
+          subject: ${{ steps.email.outputs.email_subject }}
+          html_body: file://deployment-email.html
+          to: ${{ secrets.EMAIL_RECIPIENTS }}
+          from: ${{ secrets.EMAIL_FROM }}
+          reply_to: ${{ secrets.EMAIL_FROM }}
+          priority: ${{ steps.email.outputs.email_priority }}
+
+      - name: Upload email artifact
+        if: always()
+        uses: actions/upload-artifact@v4
+        with:
+          name: deployment-email-${{ steps.deployment-info.outputs.deployment_branch }}-${{ github.run_id }}
+          path: deployment-email.html
+          retention-days: 30
+
+      - name: Notification Summary
+        if: always()
+        run: |
+          echo "## 📧 Deployment Notification Summary" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "| Field | Value |" >> $GITHUB_STEP_SUMMARY
+          echo "|-------|-------|" >> $GITHUB_STEP_SUMMARY
+          echo "| **Deployment Status** | ${{ steps.deployment-info.outputs.deployment_status == 'success' && '✅ Success' || '❌ Failed' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Environment** | ${{ steps.commit-info.outputs.environment_emoji }} ${{ steps.commit-info.outputs.environment }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Branch** | \`${{ steps.deployment-info.outputs.deployment_branch }}\` |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Author** | ${{ steps.commit-info.outputs.commit_author }} |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Site URL** | [${{ steps.commit-info.outputs.site_url }}](${{ steps.commit-info.outputs.site_url }}) |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Workflow** | [${{ steps.deployment-info.outputs.workflow_url }}](${{ steps.deployment-info.outputs.workflow_url }}) |" >> $GITHUB_STEP_SUMMARY
+          echo "| **Email Status** | ${{ job.status == 'success' && '✅ Successfully sent' || '❌ Failed to send' }} |" >> $GITHUB_STEP_SUMMARY
+          echo "" >> $GITHUB_STEP_SUMMARY
+          
+          if [[ "${{ steps.deployment-info.outputs.deployment_status }}" == "success" ]]; then
+            echo "🎉 **Deployment completed successfully!**" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "- 🌐 **Live Site**: [${{ steps.commit-info.outputs.site_url }}](${{ steps.commit-info.outputs.site_url }})" >> $GITHUB_STEP_SUMMARY
+          else
+            echo "⚠️ **Deployment failed!**" >> $GITHUB_STEP_SUMMARY
+            echo "" >> $GITHUB_STEP_SUMMARY
+            echo "- 🔍 **Check Logs**: [${{ steps.deployment-info.outputs.workflow_url }}](${{ steps.deployment-info.outputs.workflow_url }})" >> $GITHUB_STEP_SUMMARY
+          fi
+          
+          echo "" >> $GITHUB_STEP_SUMMARY
+          echo "📎 Email content has been saved as an artifact for review." >> $GITHUB_STEP_SUMMARY
+
+      # Additional step for Slack notification (optional)
+      # - name: Send Slack notification (if configured)
+      #   if: always() && secrets.SLACK_BOT_TOKEN != '' && secrets.SLACK_CHANNEL_ID != ''
+      #   uses: slackapi/slack-github-action@v1.25.0
+      #   with:
+      #     channel-id: ${{ secrets.SLACK_CHANNEL_ID }}
+      #     slack-message: |
+      #       ${{ steps.deployment-info.outputs.deployment_status == 'success' && '✅' || '❌' }} **WordPress Deployment ${{ steps.deployment-info.outputs.deployment_status == 'success' && 'Successful' || 'Failed' }}**
+            
+      #       **Environment**: ${{ steps.commit-info.outputs.environment_emoji }} ${{ steps.commit-info.outputs.environment }}
+      #       **Branch**: `${{ steps.deployment-info.outputs.deployment_branch }}`
+      #       **Author**: ${{ steps.commit-info.outputs.commit_author }}
+      #       **Message**: ${{ steps.commit-info.outputs.commit_message }}
+            
+      #       ${{ steps.deployment-info.outputs.deployment_status == 'success' && '🌐 [View Site](' || '🔍 [View Logs](' }}${{ steps.deployment-info.outputs.deployment_status == 'success' && steps.commit-info.outputs.site_url || steps.deployment-info.outputs.workflow_url }})
+      #   env:
+      #     SLACK_BOT_TOKEN: ${{ secrets.SLACK_BOT_TOKEN }}
