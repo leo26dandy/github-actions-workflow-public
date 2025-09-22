@@ -40,9 +40,9 @@ Before deploying:
 2. ✅ Update site URLs in lines 117-120
 3. ✅ Update theme paths in lines 130, 144
 4. ✅ Ensure all email secrets are configured:
-  - SMTP_SERVER, SMTP_PORT
-  - EMAIL_USERNAME, EMAIL_PASSWORD
-  - EMAIL_RECIPIENTS, EMAIL_FROM
+ - SMTP_SERVER, SMTP_PORT
+ - EMAIL_USERNAME, EMAIL_PASSWORD
+ - EMAIL_RECIPIENTS, EMAIL_FROM
 
 Test process:
 1. Deploy this updated workflow
